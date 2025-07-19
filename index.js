@@ -905,66 +905,59 @@ Important: Return only the JSON object without any extra text, markdown formatti
     extractAndCleanJSON(responseText) {
         console.log('🔍 Raw AI Response:', responseText);
         
+        // Method 1: Try parsing the response directly (often works!)
         try {
-            // Step 1: Remove common markdown and formatting
+            const parsed = JSON.parse(responseText.trim());
+            console.log('✅ Direct JSON parse successful!');
+            return this.cleanObjectValues(parsed);
+        } catch (e) {
+            console.log('❌ Direct parse failed, trying extraction...');
+        }
+
+        // Method 2: Simple extraction - find first { to last }
+        try {
+            const startIndex = responseText.indexOf('{');
+            const endIndex = responseText.lastIndexOf('}');
+            
+            if (startIndex !== -1 && endIndex !== -1 && startIndex < endIndex) {
+                let jsonString = responseText.substring(startIndex, endIndex + 1);
+                console.log('🎯 Extracted JSON:', jsonString);
+                
+                const parsed = JSON.parse(jsonString);
+                console.log('✅ Simple extraction successful!');
+                return this.cleanObjectValues(parsed);
+            }
+        } catch (e) {
+            console.log('❌ Simple extraction failed, trying cleaning...');
+        }
+
+        // Method 3: Clean common issues and try again
+        try {
             let cleaned = responseText
-                .replace(/```json\s*/gi, '')  // Remove ```json
-                .replace(/```\s*/gi, '')      // Remove ```
-                .replace(/^\s*Here.*?:/gmi, '') // Remove "Here is the JSON:" etc
-                .replace(/^\s*The.*?:/gmi, '')  // Remove "The extracted data:"
-                .replace(/^\s*Based.*?:/gmi, '') // Remove "Based on the image:"
+                .replace(/```json/gi, '')
+                .replace(/```/gi, '')
+                .replace(/\*\*/g, '')  // Remove bold
+                .replace(/\*/g, '')    // Remove asterisks
                 .trim();
 
-            console.log('🧹 After basic cleaning:', cleaned);
-
-            // Step 2: Find JSON object bounds more carefully
-            let startIndex = cleaned.indexOf('{');
-            let endIndex = -1;
+            const startIndex = cleaned.indexOf('{');
+            const endIndex = cleaned.lastIndexOf('}');
             
-            if (startIndex !== -1) {
-                // Count braces to find the matching closing brace
-                let braceCount = 0;
-                for (let i = startIndex; i < cleaned.length; i++) {
-                    if (cleaned[i] === '{') braceCount++;
-                    if (cleaned[i] === '}') {
-                        braceCount--;
-                        if (braceCount === 0) {
-                            endIndex = i;
-                            break;
-                        }
-                    }
-                }
+            if (startIndex !== -1 && endIndex !== -1) {
+                let jsonString = cleaned.substring(startIndex, endIndex + 1);
+                console.log('🧹 Cleaned JSON:', jsonString);
+                
+                const parsed = JSON.parse(jsonString);
+                console.log('✅ Cleaned parsing successful!');
+                return this.cleanObjectValues(parsed);
             }
-            
-            if (startIndex === -1 || endIndex === -1) {
-                throw new Error('No valid JSON object bounds found');
-            }
-
-            // Step 3: Extract the JSON portion
-            let jsonString = cleaned.substring(startIndex, endIndex + 1);
-            console.log('🎯 Extracted JSON string:', jsonString);
-            
-            // Step 4: Clean up common issues in JSON values
-            jsonString = this.sanitizeJSONValues(jsonString);
-            console.log('✨ After sanitization:', jsonString);
-            
-            // Step 5: Parse and validate
-            const parsed = JSON.parse(jsonString);
-            console.log('✅ Successfully parsed JSON:', parsed);
-            
-            // Step 6: Additional cleaning of string values
-            const cleaned_object = this.cleanObjectValues(parsed);
-            console.log('🎉 Final cleaned object:', cleaned_object);
-            
-            return cleaned_object;
-            
-        } catch (error) {
-            console.error('❌ JSON extraction error:', error.message);
-            console.error('📝 Original response (first 1000 chars):', responseText.substring(0, 1000));
-            
-            // Try alternative parsing methods
-            return this.tryAlternativeParsing(responseText);
+        } catch (e) {
+            console.log('❌ Cleaned parsing failed, trying manual extraction...');
         }
+
+        // Method 4: Manual field extraction as last resort
+        console.log('🔧 Attempting manual field extraction...');
+        return this.extractFieldsManually(responseText);
     }
 
     sanitizeJSONValues(jsonString) {
@@ -988,143 +981,91 @@ Important: Return only the JSON object without any extra text, markdown formatti
         return sanitized;
     }
 
-    tryAlternativeParsing(responseText) {
-        console.log('🔄 Trying alternative parsing methods...');
+    extractFieldsManually(text) {
+        console.log('🔧 Manual field extraction from text...');
         
-        // Method 1: Try to extract individual fields with regex
-        try {
-            const alternativeData = this.extractFieldsWithRegex(responseText);
-            if (alternativeData) {
-                console.log('✅ Alternative parsing successful');
-                return alternativeData;
-            }
-        } catch (error) {
-            console.log('❌ Alternative parsing failed:', error.message);
-        }
-
-        // Method 2: Try to fix and re-parse
-        try {
-            const fixedJson = this.attemptJSONFix(responseText);
-            const parsed = JSON.parse(fixedJson);
-            console.log('✅ JSON fix successful');
-            return this.cleanObjectValues(parsed);
-        } catch (error) {
-            console.log('❌ JSON fix failed:', error.message);
-        }
-
-        // Method 3: Fallback object
-        console.log('🚨 All parsing methods failed, using fallback');
-        return this.createFallbackObject(responseText);
-    }
-
-    extractFieldsWithRegex(text) {
-        console.log('🔍 Attempting regex field extraction...');
-        
-        // Try to extract individual fields using regex patterns
-        const patterns = {
-            supplier: /"supplier":\s*"([^"]+)"/i,
-            invoice_number: /"invoice_number":\s*"([^"]+)"/i,
-            date: /"date":\s*"([^"]+)"/i,
-            total: /"total":\s*"([^"]+)"/i,
-            tax: /"tax":\s*"([^"]+)"/i
+        // Create a base object
+        const result = {
+            supplier: '',
+            invoice_number: '',
+            date: new Date().toISOString().split('T')[0],
+            total: '',
+            tax: '',
+            items: []
         };
 
-        const extracted = {};
-        let hasValidData = false;
+        // Try to extract supplier/vendor
+        const supplierPatterns = [
+            /"supplier":\s*"([^"]+)"/i,
+            /"vendor":\s*"([^"]+)"/i,
+            /supplier[:\s]+([^\n,]+)/i,
+            /vendor[:\s]+([^\n,]+)/i
+        ];
+        
+        for (const pattern of supplierPatterns) {
+            const match = text.match(pattern);
+            if (match && match[1] && match[1].trim().length > 1) {
+                result.supplier = match[1].trim().replace(/[*"]/g, '');
+                break;
+            }
+        }
 
-        for (const [field, pattern] of Object.entries(patterns)) {
+        // Try to extract total
+        const totalPatterns = [
+            /"total":\s*"([^"]+)"/i,
+            /total[:\s]+\$?([0-9.,]+)/i,
+            /amount[:\s]+\$?([0-9.,]+)/i
+        ];
+        
+        for (const pattern of totalPatterns) {
             const match = text.match(pattern);
             if (match && match[1]) {
-                extracted[field] = match[1].replace(/\*+/g, '').trim();
-                hasValidData = true;
-            } else {
-                extracted[field] = '';
+                result.total = match[1].trim().replace(/[*"]/g, '');
+                break;
             }
         }
 
-        // Try to extract items array - be more flexible
-        let items = [];
+        // Try to extract items - look for description patterns
+        const itemPatterns = [
+            /"description":\s*"([^"]+)"/gi,
+            /item[:\s]+([^\n,]+)/gi,
+            /product[:\s]+([^\n,]+)/gi
+        ];
+
+        const foundItems = new Set(); // Avoid duplicates
         
-        // Method 1: Look for items array
-        const itemsMatch = text.match(/"items":\s*\[(.*?)\]/s);
-        if (itemsMatch) {
-            try {
-                const itemsText = itemsMatch[1];
-                
-                // Look for description patterns
-                const descriptionMatches = itemsText.match(/"description":\s*"([^"]+)"/g);
-                if (descriptionMatches) {
-                    descriptionMatches.forEach(match => {
-                        const desc = match.match(/"description":\s*"([^"]+)"/)[1];
-                        items.push({
-                            description: desc.replace(/\*+/g, '').trim(),
+        for (const pattern of itemPatterns) {
+            const matches = text.matchAll(pattern);
+            for (const match of matches) {
+                if (match[1] && match[1].trim().length > 2) {
+                    const cleanDesc = match[1].trim().replace(/[*"]/g, '');
+                    if (!foundItems.has(cleanDesc) && cleanDesc !== 'Parsing failed - check original document') {
+                        foundItems.add(cleanDesc);
+                        result.items.push({
+                            description: cleanDesc,
                             quantity: '',
                             unit_type: '',
                             unit_price: '',
                             total_price: '',
                             sku: ''
                         });
-                    });
-                    hasValidData = true;
-                }
-            } catch (e) {
-                console.log('Error parsing items array:', e.message);
-            }
-        }
-        
-        // Method 2: Look for individual item objects even outside proper array
-        if (items.length === 0) {
-            const descriptionMatches = text.match(/"description":\s*"([^"]+)"/g);
-            if (descriptionMatches) {
-                descriptionMatches.forEach(match => {
-                    const desc = match.match(/"description":\s*"([^"]+)"/)[1];
-                    if (desc && desc.length > 2) {
-                        items.push({
-                            description: desc.replace(/\*+/g, '').trim(),
-                            quantity: '',
-                            unit_type: '',
-                            unit_price: '',
-                            total_price: '',
-                            sku: ''
-                        });
-                        hasValidData = true;
                     }
-                });
+                }
             }
         }
-        
-        extracted.items = items;
 
-        return hasValidData ? extracted : null;
-    }
-
-    attemptJSONFix(text) {
-        console.log('🔧 Attempting JSON structure fix...');
-        
-        // Find JSON-like content
-        let jsonStart = text.indexOf('{');
-        let jsonEnd = text.lastIndexOf('}');
-        
-        if (jsonStart === -1 || jsonEnd === -1) {
-            throw new Error('No JSON structure found');
+        // If we found any meaningful data, return it
+        if (result.supplier || result.total || result.items.length > 0) {
+            console.log(`✅ Manual extraction found: supplier="${result.supplier}", total="${result.total}", items=${result.items.length}`);
+            return result;
         }
-        
-        let jsonLike = text.substring(jsonStart, jsonEnd + 1);
-        
-        // Apply aggressive cleaning
-        jsonLike = jsonLike
-            // Remove all asterisks
-            .replace(/\*+/g, '')
-            // Fix common JSON errors
-            .replace(/([{,]\s*)(\w+):/g, '$1"$2":')  // Add quotes to keys
-            .replace(/:\s*([^",{\[\]}\s][^",{\[\]}\n]*[^",{\[\]}\s])\s*([,}])/g, ': "$1"$2')  // Quote unquoted values
-            .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
-            .replace(/\n/g, ' ')  // Remove newlines
-            .replace(/\t/g, ' ')  // Remove tabs
-            .replace(/\s+/g, ' '); // Collapse spaces
-        
-        return jsonLike;
+
+        // If we got nothing useful, return fallback
+        console.log('❌ Manual extraction found no useful data');
+        return this.createFallbackObject(text);
     }
+
+
 
     cleanObjectValues(obj) {
         if (typeof obj !== 'object' || obj === null) {
@@ -1175,27 +1116,26 @@ Important: Return only the JSON object without any extra text, markdown formatti
     }
 
     validateParsedData(data, type = 'invoice') {
-        // Quick validation to see if we got meaningful data
+        // Very basic validation - just check if we got some data
         if (!data) return false;
         
         if (type === 'invoice') {
-            // For invoices, we need at least a supplier or some items
-            if (data.supplier && data.supplier !== 'Unknown' && data.supplier.length > 0) {
-                return true;
-            }
+            // For invoices, any of these counts as valid
+            if (data.supplier && data.supplier.length > 1 && data.supplier !== 'Unknown') return true;
+            if (data.total && data.total.length > 0) return true;
             if (data.items && data.items.length > 0) {
-                // Check if we have any meaningful item data
                 const validItem = data.items.find(item => 
                     item.description && 
-                    item.description !== 'Parsing failed - check original document' &&
-                    item.description.length > 2
+                    item.description.length > 3 &&
+                    !item.description.includes('Parsing failed')
                 );
-                return !!validItem;
+                if (validItem) return true;
             }
         } else {
-            // For receipts, we need at least a vendor or total
-            if (data.vendor && data.vendor.length > 0) return true;
+            // For receipts, any of these counts as valid  
+            if (data.vendor && data.vendor.length > 1) return true;
             if (data.total && data.total.length > 0) return true;
+            if (data.items && data.items.length > 0) return true;
         }
         
         return false;
