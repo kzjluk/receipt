@@ -1,0 +1,25 @@
+{
+  "name": "cloud-receipt-monitor",
+  "version": "1.0.0",
+  "description": "Cloud-based AI receipt processing with Google Sheets integration",
+  "main": "cloud_server.js",
+  "scripts": {
+    "start": "node cloud_server.js",
+    "dev": "node cloud_server.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "keywords": [
+    "receipt-processing",
+    "ai",
+    "google-sheets",
+    "automation",
+    "cloud"
+  ],
+  "author": "AI Receipt Monitor",
+  "license": "MIT"
+}
