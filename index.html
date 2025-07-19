@@ -292,6 +292,7 @@
                         <li>✅ Automatic token refresh</li>
                         <li>✅ Access from anywhere</li>
                         <li>✅ Separate Google Sheets tabs for receipts and invoice items</li>
+                        <li>✅ <strong>Remembers your configuration</strong> - no need to re-enter folder IDs</li>
                     </ul>
                 </div>
 
@@ -360,6 +361,7 @@
                 <div class="button-group">
                     <button id="startMonitor">🚀 Start Monitor</button>
                     <button id="stopMonitor" disabled>🛑 Stop Monitor</button>
+                    <button id="saveConfig">💾 Save Configuration</button>
                     <button id="refreshStats">🔄 Refresh Stats</button>
                 </div>
             </div>
@@ -429,6 +431,7 @@
 
         document.getElementById('startMonitor').addEventListener('click', startMonitor);
         document.getElementById('stopMonitor').addEventListener('click', stopMonitor);
+        document.getElementById('saveConfig').addEventListener('click', saveConfiguration);
         document.getElementById('refreshStats').addEventListener('click', refreshStats);
 
         // Auto-refresh stats every 30 seconds when monitoring
@@ -437,6 +440,9 @@
                 refreshStats();
             }
         }, 30000);
+
+        // Load saved configuration on page load
+        loadConfiguration();
 
         async function startMonitor() {
             const config = {
@@ -460,6 +466,9 @@
                 document.getElementById('startMonitor').disabled = true;
                 showStatus('Starting cloud monitor...', 'info');
 
+                // Auto-save configuration when starting
+                await saveConfiguration();
+
                 const response = await fetch('/api/start-monitor', {
                     method: 'POST',
                     headers: {
@@ -473,7 +482,15 @@
                 if (result.success) {
                     monitorRunning = true;
                     updateMonitorStatus(true);
-                    showStatus('✅ Cloud monitor started successfully! Processing receipts 24/7...', 'success');
+                    
+                    let successMessage = '✅ Cloud monitor started successfully!';
+                    if (config.invoiceWatchFolderId && config.completedInvoicesFolderId && config.failedInvoicesFolderId) {
+                        successMessage = '✅ Cloud receipt & invoice monitor started! Processing documents 24/7...';
+                    } else {
+                        successMessage = '✅ Cloud receipt monitor started! Processing receipts 24/7...';
+                    }
+                    
+                    showStatus(successMessage, 'success');
                     document.getElementById('stopMonitor').disabled = false;
                     refreshStats();
                 } else {
@@ -572,6 +589,67 @@
             const statusEl = document.getElementById('statusMessage');
             statusEl.textContent = message;
             statusEl.className = `status ${type}`;
+        }
+
+        async function loadConfiguration() {
+            try {
+                const response = await fetch('/api/get-config');
+                const result = await response.json();
+
+                if (result.success && result.config) {
+                    const config = result.config;
+                    
+                    // Populate form fields with saved configuration
+                    if (config.watchFolderId) document.getElementById('watchFolderId').value = config.watchFolderId;
+                    if (config.completedFolderId) document.getElementById('completedFolderId').value = config.completedFolderId;
+                    if (config.failedFolderId) document.getElementById('failedFolderId').value = config.failedFolderId;
+                    if (config.invoiceWatchFolderId) document.getElementById('invoiceWatchFolderId').value = config.invoiceWatchFolderId;
+                    if (config.completedInvoicesFolderId) document.getElementById('completedInvoicesFolderId').value = config.completedInvoicesFolderId;
+                    if (config.failedInvoicesFolderId) document.getElementById('failedInvoicesFolderId').value = config.failedInvoicesFolderId;
+                    if (config.spreadsheetId) document.getElementById('spreadsheetId').value = config.spreadsheetId;
+                    if (config.checkInterval) document.getElementById('checkInterval').value = config.checkInterval;
+
+                    if (Object.keys(config).length > 0 && config.watchFolderId) {
+                        showStatus('✅ Configuration loaded from previous session', 'success');
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to load configuration:', error);
+            }
+        }
+
+        async function saveConfiguration() {
+            try {
+                const config = {
+                    watchFolderId: document.getElementById('watchFolderId').value,
+                    completedFolderId: document.getElementById('completedFolderId').value,
+                    failedFolderId: document.getElementById('failedFolderId').value,
+                    invoiceWatchFolderId: document.getElementById('invoiceWatchFolderId').value,
+                    completedInvoicesFolderId: document.getElementById('completedInvoicesFolderId').value,
+                    failedInvoicesFolderId: document.getElementById('failedInvoicesFolderId').value,
+                    spreadsheetId: document.getElementById('spreadsheetId').value,
+                    checkInterval: parseInt(document.getElementById('checkInterval').value)
+                };
+
+                const response = await fetch('/api/save-config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(config)
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showStatus('💾 Configuration saved successfully!', 'success');
+                } else {
+                    throw new Error(result.error);
+                }
+
+            } catch (error) {
+                showStatus(`❌ Failed to save configuration: ${error.message}`, 'error');
+            }
         }
 
         // Load initial stats
