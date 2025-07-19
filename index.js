@@ -375,21 +375,29 @@ class CloudReceiptMonitor {
                 content: [
                     {
                         type: "text",
-                        text: `Please analyze this receipt image and extract the following information in JSON format:
-                        {
-                            "vendor": "business name",
-                            "date": "YYYY-MM-DD format",
-                            "total": "total amount including currency symbol",
-                            "subtotal": "subtotal before tax",
-                            "tax": "tax amount",
-                            "payment_method": "cash/card/etc",
-                            "card_last_four": "last 4 digits of credit card if visible (e.g., '1234')",
-                            "category": "food/gas/retail/etc",
-                            "items": ["list of individual items if visible"]
-                        }
-                        
-                        Look for credit card numbers that appear as: ****1234, xxxx1234, or similar patterns.
-                        IMPORTANT: Return ONLY valid JSON. No markdown, no extra text, no explanation.`
+                        text: `CRITICAL: Return ONLY a valid JSON object. No other text.
+
+Extract from this receipt into this EXACT JSON structure:
+{
+"vendor": "business name",
+"date": "YYYY-MM-DD",
+"total": "total amount with currency",
+"subtotal": "subtotal amount",
+"tax": "tax amount", 
+"payment_method": "cash or card",
+"card_last_four": "last 4 digits if visible",
+"category": "food or gas or retail etc",
+"items": ["item1", "item2"]
+}
+
+Rules:
+- Return ONLY the JSON object
+- NO asterisks, NO bold text, NO markdown
+- Use straight quotes " not curly quotes  
+- If field not found, use empty string ""
+- Look for ****1234 or xxxx1234 patterns for card numbers
+
+RESPOND WITH ONLY THE JSON OBJECT:`
                     },
                     {
                         type: "image_url",
@@ -420,7 +428,14 @@ class CloudReceiptMonitor {
         const responseText = data.choices[0].message.content;
         
         // Clean and extract JSON more robustly
-        return this.extractAndCleanJSON(responseText);
+        const parsedData = this.extractAndCleanJSON(responseText);
+        
+        // Validate that we got meaningful data
+        if (!this.validateParsedData(parsedData, 'receipt')) {
+            console.log('⚠️ Parsed receipt data seems invalid, but continuing with what we have');
+        }
+        
+        return parsedData;
     }
 
     async parseInvoiceWithAI(imageData) {
@@ -431,29 +446,36 @@ class CloudReceiptMonitor {
                 content: [
                     {
                         type: "text",
-                        text: `Please analyze this supplier invoice image and extract detailed item pricing information in JSON format:
-                        {
-                            "supplier": "supplier/vendor name",
-                            "invoice_number": "invoice number",
-                            "date": "YYYY-MM-DD format",
-                            "total": "total invoice amount including currency symbol",
-                            "tax": "tax amount if visible",
-                            "items": [
-                                {
-                                    "description": "item name/description",
-                                    "quantity": "quantity ordered (just the number)",
-                                    "unit_type": "unit of measurement (e.g. kg, grams, L, pieces, lbs, oz)",
-                                    "unit_price": "price per unit including currency symbol (if visible)",
-                                    "total_price": "total for this line item including currency symbol",
-                                    "sku": "product code/SKU if visible"
-                                }
-                            ]
-                        }
-                        
-                        Look carefully for units of measurement like kg, grams, L, lbs, oz, pieces, etc. Extract the numeric quantity and unit type separately.
-                        If unit price is not visible but you have quantity, unit type, and total price, leave unit_price empty - we'll calculate it.
-                        Focus on extracting individual item details with their specific prices and units.
-                        IMPORTANT: Return ONLY valid JSON. No markdown, no extra text, no explanation, no asterisks, no bold formatting.`
+                        text: `CRITICAL: You must return ONLY a valid JSON object. No other text, no explanations, no markdown.
+
+Extract data from this invoice image into this EXACT JSON structure:
+{
+"supplier": "company name",
+"invoice_number": "invoice number",
+"date": "YYYY-MM-DD",
+"total": "total amount with currency",
+"tax": "tax amount if visible",
+"items": [
+{
+"description": "item name",
+"quantity": "number only",
+"unit_type": "kg or L or pieces etc",
+"unit_price": "price per unit with currency",
+"total_price": "line total with currency",
+"sku": "product code if visible"
+}
+]
+}
+
+Rules:
+- Return ONLY the JSON object
+- NO asterisks, NO bold text, NO markdown
+- Use straight quotes " not curly quotes
+- If field not found, use empty string ""
+- Separate quantity numbers from unit types
+- Look for kg, grams, L, lbs, oz, pieces, boxes, etc.
+
+RESPOND WITH ONLY THE JSON OBJECT:`
                     },
                     {
                         type: "image_url",
@@ -485,6 +507,11 @@ class CloudReceiptMonitor {
         
         // Clean and extract JSON more robustly
         const parsedData = this.extractAndCleanJSON(responseText);
+        
+        // Validate that we got meaningful data
+        if (!this.validateParsedData(parsedData, 'invoice')) {
+            console.log('⚠️ Parsed data seems invalid, but continuing with what we have');
+        }
         
         // Calculate missing unit prices using backup model if needed
         if (parsedData.items) {
@@ -885,59 +912,208 @@ class CloudReceiptMonitor {
     }
 
     extractAndCleanJSON(responseText) {
+        console.log('🔍 Raw AI Response:', responseText);
+        
         try {
-            // Remove common markdown formatting and extra text
+            // Step 1: Remove common markdown and formatting
             let cleaned = responseText
                 .replace(/```json\s*/gi, '')  // Remove ```json
                 .replace(/```\s*/gi, '')      // Remove ```
                 .replace(/^\s*Here.*?:/gmi, '') // Remove "Here is the JSON:" etc
                 .replace(/^\s*The.*?:/gmi, '')  // Remove "The extracted data:"
-                .replace(/\*\*/g, '')         // Remove bold markdown **
-                .replace(/\*/g, '')           // Remove asterisks *
+                .replace(/^\s*Based.*?:/gmi, '') // Remove "Based on the image:"
                 .trim();
 
-            // Find JSON object bounds more carefully
+            console.log('🧹 After basic cleaning:', cleaned);
+
+            // Step 2: Find JSON object bounds more carefully
             let startIndex = cleaned.indexOf('{');
-            let endIndex = cleaned.lastIndexOf('}');
+            let endIndex = -1;
             
-            if (startIndex === -1 || endIndex === -1 || startIndex >= endIndex) {
-                throw new Error('No valid JSON object found in response');
+            if (startIndex !== -1) {
+                // Count braces to find the matching closing brace
+                let braceCount = 0;
+                for (let i = startIndex; i < cleaned.length; i++) {
+                    if (cleaned[i] === '{') braceCount++;
+                    if (cleaned[i] === '}') {
+                        braceCount--;
+                        if (braceCount === 0) {
+                            endIndex = i;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (startIndex === -1 || endIndex === -1) {
+                throw new Error('No valid JSON object bounds found');
             }
 
-            // Extract the JSON portion
+            // Step 3: Extract the JSON portion
             let jsonString = cleaned.substring(startIndex, endIndex + 1);
+            console.log('🎯 Extracted JSON string:', jsonString);
             
-            // Clean up common issues in JSON values
+            // Step 4: Clean up common issues in JSON values
             jsonString = this.sanitizeJSONValues(jsonString);
+            console.log('✨ After sanitization:', jsonString);
             
-            // Parse and validate
+            // Step 5: Parse and validate
             const parsed = JSON.parse(jsonString);
+            console.log('✅ Successfully parsed JSON:', parsed);
             
-            // Additional cleaning of string values
-            return this.cleanObjectValues(parsed);
+            // Step 6: Additional cleaning of string values
+            const cleaned_object = this.cleanObjectValues(parsed);
+            console.log('🎉 Final cleaned object:', cleaned_object);
+            
+            return cleaned_object;
             
         } catch (error) {
-            console.error('JSON extraction error:', error.message);
-            console.error('Original response:', responseText);
+            console.error('❌ JSON extraction error:', error.message);
+            console.error('📝 Original response:', responseText);
+            console.error('🔧 Stack trace:', error.stack);
             
-            // Fallback: try to create a minimal valid object
-            return this.createFallbackObject(responseText);
+            // Try alternative parsing methods
+            return this.tryAlternativeParsing(responseText);
         }
     }
 
     sanitizeJSONValues(jsonString) {
         // Fix common issues in JSON string values
-        return jsonString
-            // Remove asterisks from values but not structure
-            .replace(/"([^"]*)\*([^"]*)"/g, '"$1$2"')
-            // Remove markdown bold from values
+        let sanitized = jsonString
+            // Remove asterisks from values
+            .replace(/"([^"]*)\*+([^"]*)"/g, '"$1$2"')
+            // Remove markdown bold from values  
             .replace(/"([^"]*)\*\*([^"]*)\*\*([^"]*)"/g, '"$1$2$3"')
-            // Escape unescaped quotes in values
-            .replace(/: "([^"]*)"([^",}\]]*[^"\s])"([^"]*)"(,|\}|\])/g, (match, p1, p2, p3, p4) => {
-                return `: "${p1}\\"${p2}\\"${p3}"${p4}`;
-            })
+            // Fix unescaped quotes in values
+            .replace(/: "([^"]*)"([^",}\]]*)"([^"]*)"(,|\}|\])/g, ': "$1\\"$2\\"$3"$4')
             // Remove newlines in string values
-            .replace(/: "([^"]*)\n([^"]*)"/g, ': "$1 $2"');
+            .replace(/: "([^"]*)\n([^"]*)"/g, ': "$1 $2"')
+            // Remove tabs in string values
+            .replace(/: "([^"]*)\t([^"]*)"/g, ': "$1 $2"')
+            // Fix trailing commas
+            .replace(/,(\s*[}\]])/g, '$1')
+            // Remove extra spaces
+            .replace(/\s+/g, ' ');
+
+        return sanitized;
+    }
+
+    tryAlternativeParsing(responseText) {
+        console.log('🔄 Trying alternative parsing methods...');
+        
+        // Method 1: Try to extract individual fields with regex
+        try {
+            const alternativeData = this.extractFieldsWithRegex(responseText);
+            if (alternativeData) {
+                console.log('✅ Alternative parsing successful');
+                return alternativeData;
+            }
+        } catch (error) {
+            console.log('❌ Alternative parsing failed:', error.message);
+        }
+
+        // Method 2: Try to fix and re-parse
+        try {
+            const fixedJson = this.attemptJSONFix(responseText);
+            const parsed = JSON.parse(fixedJson);
+            console.log('✅ JSON fix successful');
+            return this.cleanObjectValues(parsed);
+        } catch (error) {
+            console.log('❌ JSON fix failed:', error.message);
+        }
+
+        // Method 3: Fallback object
+        console.log('🚨 All parsing methods failed, using fallback');
+        return this.createFallbackObject(responseText);
+    }
+
+    extractFieldsWithRegex(text) {
+        console.log('🔍 Attempting regex field extraction...');
+        
+        // Try to extract individual fields using regex patterns
+        const patterns = {
+            supplier: /"supplier":\s*"([^"]+)"/i,
+            invoice_number: /"invoice_number":\s*"([^"]+)"/i,
+            date: /"date":\s*"([^"]+)"/i,
+            total: /"total":\s*"([^"]+)"/i,
+            tax: /"tax":\s*"([^"]+)"/i
+        };
+
+        const extracted = {};
+        let hasValidData = false;
+
+        for (const [field, pattern] of Object.entries(patterns)) {
+            const match = text.match(pattern);
+            if (match && match[1]) {
+                extracted[field] = match[1].replace(/\*+/g, '').trim();
+                hasValidData = true;
+            } else {
+                extracted[field] = '';
+            }
+        }
+
+        // Try to extract items array
+        const itemsMatch = text.match(/"items":\s*\[(.*?)\]/s);
+        if (itemsMatch) {
+            try {
+                // Simple item extraction
+                const itemsText = itemsMatch[1];
+                const items = [];
+                
+                // Look for description patterns
+                const descriptionMatches = itemsText.match(/"description":\s*"([^"]+)"/g);
+                if (descriptionMatches) {
+                    descriptionMatches.forEach(match => {
+                        const desc = match.match(/"description":\s*"([^"]+)"/)[1];
+                        items.push({
+                            description: desc.replace(/\*+/g, '').trim(),
+                            quantity: '',
+                            unit_type: '',
+                            unit_price: '',
+                            total_price: '',
+                            sku: ''
+                        });
+                    });
+                }
+                
+                extracted.items = items;
+                hasValidData = true;
+            } catch (e) {
+                extracted.items = [];
+            }
+        } else {
+            extracted.items = [];
+        }
+
+        return hasValidData ? extracted : null;
+    }
+
+    attemptJSONFix(text) {
+        console.log('🔧 Attempting JSON structure fix...');
+        
+        // Find JSON-like content
+        let jsonStart = text.indexOf('{');
+        let jsonEnd = text.lastIndexOf('}');
+        
+        if (jsonStart === -1 || jsonEnd === -1) {
+            throw new Error('No JSON structure found');
+        }
+        
+        let jsonLike = text.substring(jsonStart, jsonEnd + 1);
+        
+        // Apply aggressive cleaning
+        jsonLike = jsonLike
+            // Remove all asterisks
+            .replace(/\*+/g, '')
+            // Fix common JSON errors
+            .replace(/([{,]\s*)(\w+):/g, '$1"$2":')  // Add quotes to keys
+            .replace(/:\s*([^",{\[\]}\s][^",{\[\]}\n]*[^",{\[\]}\s])\s*([,}])/g, ': "$1"$2')  // Quote unquoted values
+            .replace(/,(\s*[}\]])/g, '$1')  // Remove trailing commas
+            .replace(/\n/g, ' ')  // Remove newlines
+            .replace(/\t/g, ' ')  // Remove tabs
+            .replace(/\s+/g, ' '); // Collapse spaces
+        
+        return jsonLike;
     }
 
     cleanObjectValues(obj) {
@@ -968,7 +1144,8 @@ class CloudReceiptMonitor {
 
     createFallbackObject(responseText) {
         // Create a minimal object when JSON parsing fails completely
-        console.log('Creating fallback object due to JSON parsing failure');
+        console.log('🚨 Creating fallback object due to JSON parsing failure');
+        console.log('📝 Response text that failed:', responseText.substring(0, 500) + '...');
         
         return {
             supplier: 'Unknown',
@@ -985,6 +1162,33 @@ class CloudReceiptMonitor {
                 sku: ''
             }]
         };
+    }
+
+    validateParsedData(data, type = 'invoice') {
+        // Quick validation to see if we got meaningful data
+        if (!data) return false;
+        
+        if (type === 'invoice') {
+            // For invoices, we need at least a supplier or some items
+            if (data.supplier && data.supplier !== 'Unknown' && data.supplier.length > 0) {
+                return true;
+            }
+            if (data.items && data.items.length > 0) {
+                // Check if we have any meaningful item data
+                const validItem = data.items.find(item => 
+                    item.description && 
+                    item.description !== 'Parsing failed - check original document' &&
+                    item.description.length > 2
+                );
+                return !!validItem;
+            }
+        } else {
+            // For receipts, we need at least a vendor or total
+            if (data.vendor && data.vendor.length > 0) return true;
+            if (data.total && data.total.length > 0) return true;
+        }
+        
+        return false;
     }
 
     async calculateUnitPrice(quantity, totalPrice, unitType) {
