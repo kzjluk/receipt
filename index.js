@@ -399,7 +399,7 @@ class CloudReceiptMonitor {
                     }
                 ]
             }],
-            max_tokens: 1000,
+            max_tokens: 10000,
             temperature: 0.1
         };
 
@@ -466,7 +466,7 @@ class CloudReceiptMonitor {
                     }
                 ]
             }],
-            max_tokens: 2000,
+            max_tokens: 20000,
             temperature: 0.1
         };
 
@@ -931,7 +931,7 @@ class CloudReceiptMonitor {
         try {
             // Use backup model for math calculations
             const requestBody = {
-                model: "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                model: "meta-llama/Llama-Vision-Free",
                 messages: [{
                     role: "user",
                     content: `Calculate the unit price: Total price is ${totalPrice} for ${quantity} ${unitType || 'units'}.
@@ -941,7 +941,7 @@ class CloudReceiptMonitor {
                     Return ONLY the calculated unit price with currency symbol (e.g., "$1.25"). 
                     If calculation cannot be performed, return "N/A".`
                 }],
-                max_tokens: 100,
+                max_tokens: 10000,
                 temperature: 0.1
             };
 
