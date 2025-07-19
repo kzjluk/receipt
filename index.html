@@ -263,8 +263,8 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>☁️ Cloud Receipt Monitor <span class="cloud-badge">24/7 ONLINE</span></h1>
-            <p>Automated AI-powered receipt processing running in the cloud</p>
+            <h1>☁️ Cloud Receipt & Invoice Monitor <span class="cloud-badge">24/7 ONLINE</span></h1>
+            <p>Automated AI-powered receipt and supplier invoice processing running in the cloud</p>
         </div>
 
         <div class="content">
@@ -287,34 +287,59 @@
                 <div class="help-text">
                     <strong>Cloud Deployment Benefits:</strong>
                     <ul>
-                        <li>✅ Runs 24/7 without keeping your computer on</li>
+                        <li>✅ Processes receipts AND supplier invoices 24/7</li>
+                        <li>✅ Tracks individual item prices from invoices</li>
                         <li>✅ Automatic token refresh</li>
                         <li>✅ Access from anywhere</li>
-                        <li>✅ No local file dependencies</li>
+                        <li>✅ Separate Google Sheets tabs for receipts and invoice items</li>
                     </ul>
                 </div>
 
                 <div class="folder-setup">
                     <h4>📁 Required Google Drive Folder Structure:</h4>
                     <pre>📁 Receipt Processing/
-├── 📁 New Receipts/     ← Drop receipts here
-├── 📁 Completed/        ← Successfully processed  
-└── 📁 Failed/           ← Failed receipts + errors</pre>
+├── 📁 New Receipts/        ← Drop receipts here
+├── 📁 Completed/           ← Successfully processed receipts
+└── 📁 Failed/              ← Failed receipts + errors
+
+📁 Invoice Processing/
+├── 📁 New Invoices/        ← Drop supplier invoices here  
+├── 📁 Completed Invoices/  ← Successfully processed invoices
+└── 📁 Failed Invoices/     ← Failed invoices + errors</pre>
                 </div>
 
+                <h3>📋 Receipt Processing Configuration</h3>
+                
                 <div class="form-group">
                     <label for="watchFolderId">📂 Watch Folder ID (New Receipts)</label>
                     <input type="text" id="watchFolderId" placeholder="1a2b3c4d5e6f7g8h9i0j">
                 </div>
 
                 <div class="form-group">
-                    <label for="completedFolderId">✅ Completed Folder ID</label>
+                    <label for="completedFolderId">✅ Completed Folder ID (Receipts)</label>
                     <input type="text" id="completedFolderId" placeholder="2b3c4d5e6f7g8h9i0j1k">
                 </div>
 
                 <div class="form-group">
-                    <label for="failedFolderId">❌ Failed Folder ID</label>
+                    <label for="failedFolderId">❌ Failed Folder ID (Receipts)</label>
                     <input type="text" id="failedFolderId" placeholder="3c4d5e6f7g8h9i0j1k2l">
+                </div>
+
+                <h3>🧾 Invoice Processing Configuration</h3>
+                
+                <div class="form-group">
+                    <label for="invoiceWatchFolderId">📂 Invoice Watch Folder ID (New Invoices)</label>
+                    <input type="text" id="invoiceWatchFolderId" placeholder="4d5e6f7g8h9i0j1k2l3m">
+                </div>
+
+                <div class="form-group">
+                    <label for="completedInvoicesFolderId">✅ Completed Invoices Folder ID</label>
+                    <input type="text" id="completedInvoicesFolderId" placeholder="5e6f7g8h9i0j1k2l3m4n">
+                </div>
+
+                <div class="form-group">
+                    <label for="failedInvoicesFolderId">❌ Failed Invoices Folder ID</label>
+                    <input type="text" id="failedInvoicesFolderId" placeholder="6f7g8h9i0j1k2l3m4n5o">
                 </div>
 
                 <div class="form-group">
@@ -345,15 +370,27 @@
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-number" id="totalProcessed">0</div>
-                        <div class="stat-label">Total Processed</div>
+                        <div class="stat-label">Receipts Processed</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="successfulParsing">0</div>
-                        <div class="stat-label">Successful</div>
+                        <div class="stat-label">Receipt Success</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="totalInvoicesProcessed">0</div>
+                        <div class="stat-label">Invoices Processed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="successfulInvoiceParsing">0</div>
+                        <div class="stat-label">Invoice Success</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="errors">0</div>
-                        <div class="stat-label">Errors</div>
+                        <div class="stat-label">Receipt Errors</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="invoiceErrors">0</div>
+                        <div class="stat-label">Invoice Errors</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-number" id="lastCheck">Never</div>
@@ -406,13 +443,16 @@
                 watchFolderId: document.getElementById('watchFolderId').value,
                 completedFolderId: document.getElementById('completedFolderId').value,
                 failedFolderId: document.getElementById('failedFolderId').value,
+                invoiceWatchFolderId: document.getElementById('invoiceWatchFolderId').value,
+                completedInvoicesFolderId: document.getElementById('completedInvoicesFolderId').value,
+                failedInvoicesFolderId: document.getElementById('failedInvoicesFolderId').value,
                 spreadsheetId: document.getElementById('spreadsheetId').value,
                 togetherApiKey: document.getElementById('togetherApiKey').value,
                 checkInterval: parseInt(document.getElementById('checkInterval').value) * 1000
             };
 
             if (!config.watchFolderId || !config.completedFolderId || !config.failedFolderId || !config.spreadsheetId) {
-                showStatus('Please fill in all required folder IDs and spreadsheet ID', 'error');
+                showStatus('Please fill in all required receipt folder IDs and spreadsheet ID', 'error');
                 return;
             }
 
@@ -481,9 +521,12 @@
                 if (result.success) {
                     const stats = result.stats;
                     
-                    document.getElementById('totalProcessed').textContent = stats.totalProcessed;
-                    document.getElementById('successfulParsing').textContent = stats.successfulParsing;
-                    document.getElementById('errors').textContent = stats.errors;
+                    document.getElementById('totalProcessed').textContent = stats.totalProcessed || 0;
+                    document.getElementById('successfulParsing').textContent = stats.successfulParsing || 0;
+                    document.getElementById('totalInvoicesProcessed').textContent = stats.totalInvoicesProcessed || 0;
+                    document.getElementById('successfulInvoiceParsing').textContent = stats.successfulInvoiceParsing || 0;
+                    document.getElementById('errors').textContent = stats.errors || 0;
+                    document.getElementById('invoiceErrors').textContent = stats.invoiceErrors || 0;
                     
                     if (stats.lastCheck) {
                         const lastCheck = new Date(stats.lastCheck);
