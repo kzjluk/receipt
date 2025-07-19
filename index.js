@@ -375,29 +375,24 @@ class CloudReceiptMonitor {
                 content: [
                     {
                         type: "text",
-                        text: `CRITICAL: Return ONLY a valid JSON object. No other text.
+                        text: `Please analyze this receipt image and extract the transaction information.
 
-Extract from this receipt into this EXACT JSON structure:
+Return the data in this JSON format:
 {
-"vendor": "business name",
-"date": "YYYY-MM-DD",
-"total": "total amount with currency",
-"subtotal": "subtotal amount",
-"tax": "tax amount", 
-"payment_method": "cash or card",
-"card_last_four": "last 4 digits if visible",
-"category": "food or gas or retail etc",
-"items": ["item1", "item2"]
+  "vendor": "business/store name",
+  "date": "YYYY-MM-DD format",
+  "total": "total amount including currency symbol",
+  "subtotal": "subtotal before tax",
+  "tax": "tax amount",
+  "payment_method": "cash/card/etc",
+  "card_last_four": "last 4 digits of credit card if visible (look for ****1234 patterns)",
+  "category": "food/gas/retail/etc",
+  "items": ["list of individual items purchased if visible"]
 }
 
-Rules:
-- Return ONLY the JSON object
-- NO asterisks, NO bold text, NO markdown
-- Use straight quotes " not curly quotes  
-- If field not found, use empty string ""
-- Look for ****1234 or xxxx1234 patterns for card numbers
+Look for credit card numbers that appear as: ****1234, xxxx1234, or similar masked patterns.
 
-RESPOND WITH ONLY THE JSON OBJECT:`
+Return only the JSON object without any extra text or markdown formatting.`
                     },
                     {
                         type: "image_url",
@@ -446,36 +441,32 @@ RESPOND WITH ONLY THE JSON OBJECT:`
                 content: [
                     {
                         type: "text",
-                        text: `CRITICAL: You must return ONLY a valid JSON object. No other text, no explanations, no markdown.
+                        text: `Please analyze this supplier invoice image and extract detailed item pricing information. 
 
-Extract data from this invoice image into this EXACT JSON structure:
+Look carefully for individual line items, products, quantities, unit types (like kg, L, pieces, boxes), and prices.
+
+Return the data in this JSON format:
 {
-"supplier": "company name",
-"invoice_number": "invoice number",
-"date": "YYYY-MM-DD",
-"total": "total amount with currency",
-"tax": "tax amount if visible",
-"items": [
-{
-"description": "item name",
-"quantity": "number only",
-"unit_type": "kg or L or pieces etc",
-"unit_price": "price per unit with currency",
-"total_price": "line total with currency",
-"sku": "product code if visible"
-}
-]
+  "supplier": "supplier/vendor name",
+  "invoice_number": "invoice number if visible",
+  "date": "YYYY-MM-DD format if visible",
+  "total": "total invoice amount with currency symbol",
+  "tax": "tax amount if visible",
+  "items": [
+    {
+      "description": "item name or product description",
+      "quantity": "numeric quantity only (e.g., '5' not '5 kg')",
+      "unit_type": "unit of measurement (e.g., 'kg', 'L', 'pieces', 'boxes')",
+      "unit_price": "price per unit with currency if visible",
+      "total_price": "total price for this line item with currency",
+      "sku": "product code or SKU if visible"
+    }
+  ]
 }
 
-Rules:
-- Return ONLY the JSON object
-- NO asterisks, NO bold text, NO markdown
-- Use straight quotes " not curly quotes
-- If field not found, use empty string ""
-- Separate quantity numbers from unit types
-- Look for kg, grams, L, lbs, oz, pieces, boxes, etc.
+Focus on finding ALL individual items/products listed on the invoice. Look for quantity numbers and separate them from their units (kg, grams, liters, pieces, etc.).
 
-RESPOND WITH ONLY THE JSON OBJECT:`
+Important: Return only the JSON object without any extra text, markdown formatting, or explanations.`
                     },
                     {
                         type: "image_url",
@@ -969,8 +960,7 @@ RESPOND WITH ONLY THE JSON OBJECT:`
             
         } catch (error) {
             console.error('❌ JSON extraction error:', error.message);
-            console.error('📝 Original response:', responseText);
-            console.error('🔧 Stack trace:', error.stack);
+            console.error('📝 Original response (first 1000 chars):', responseText.substring(0, 1000));
             
             // Try alternative parsing methods
             return this.tryAlternativeParsing(responseText);
@@ -1052,13 +1042,14 @@ RESPOND WITH ONLY THE JSON OBJECT:`
             }
         }
 
-        // Try to extract items array
+        // Try to extract items array - be more flexible
+        let items = [];
+        
+        // Method 1: Look for items array
         const itemsMatch = text.match(/"items":\s*\[(.*?)\]/s);
         if (itemsMatch) {
             try {
-                // Simple item extraction
                 const itemsText = itemsMatch[1];
-                const items = [];
                 
                 // Look for description patterns
                 const descriptionMatches = itemsText.match(/"description":\s*"([^"]+)"/g);
@@ -1074,16 +1065,35 @@ RESPOND WITH ONLY THE JSON OBJECT:`
                             sku: ''
                         });
                     });
+                    hasValidData = true;
                 }
-                
-                extracted.items = items;
-                hasValidData = true;
             } catch (e) {
-                extracted.items = [];
+                console.log('Error parsing items array:', e.message);
             }
-        } else {
-            extracted.items = [];
         }
+        
+        // Method 2: Look for individual item objects even outside proper array
+        if (items.length === 0) {
+            const descriptionMatches = text.match(/"description":\s*"([^"]+)"/g);
+            if (descriptionMatches) {
+                descriptionMatches.forEach(match => {
+                    const desc = match.match(/"description":\s*"([^"]+)"/)[1];
+                    if (desc && desc.length > 2) {
+                        items.push({
+                            description: desc.replace(/\*+/g, '').trim(),
+                            quantity: '',
+                            unit_type: '',
+                            unit_price: '',
+                            total_price: '',
+                            sku: ''
+                        });
+                        hasValidData = true;
+                    }
+                });
+            }
+        }
+        
+        extracted.items = items;
 
         return hasValidData ? extracted : null;
     }
