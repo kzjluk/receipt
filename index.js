@@ -11,8 +11,9 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static('.'));
 
-// Store for our monitor instance
+// Store for our monitor instance and configuration
 let receiptMonitor = null;
+let savedConfig = {};
 
 // Environment variables for Google OAuth
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -384,7 +385,7 @@ class CloudReceiptMonitor {
                         }
                         
                         Look for credit card numbers that appear as: ****1234, xxxx1234, or similar patterns.
-                        Return only the JSON object, no other text.`
+                        IMPORTANT: Return ONLY valid JSON. No markdown, no extra text, no explanation.`
                     },
                     {
                         type: "image_url",
@@ -413,10 +414,9 @@ class CloudReceiptMonitor {
 
         const data = await response.json();
         const responseText = data.choices[0].message.content;
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        const jsonString = jsonMatch ? jsonMatch[0] : responseText;
         
-        return JSON.parse(jsonString);
+        // Clean and extract JSON more robustly
+        return this.extractAndCleanJSON(responseText);
     }
 
     async parseInvoiceWithAI(imageData) {
@@ -446,7 +446,7 @@ class CloudReceiptMonitor {
                         }
                         
                         Focus on extracting individual item details with their specific prices. Look for line items, product codes, quantities, and unit prices. This is for tracking supplier pricing data.
-                        Return only the JSON object, no other text.`
+                        IMPORTANT: Return ONLY valid JSON. No markdown, no extra text, no explanation, no asterisks, no bold formatting.`
                     },
                     {
                         type: "image_url",
@@ -475,10 +475,9 @@ class CloudReceiptMonitor {
 
         const data = await response.json();
         const responseText = data.choices[0].message.content;
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        const jsonString = jsonMatch ? jsonMatch[0] : responseText;
         
-        return JSON.parse(jsonString);
+        // Clean and extract JSON more robustly
+        return this.extractAndCleanJSON(responseText);
     }
 
     async addToGoogleSheets(receiptData, filename) {
@@ -867,6 +866,108 @@ class CloudReceiptMonitor {
                /\.(jpg|jpeg|png|webp|gif|bmp|pdf)$/i.test(file.name);
     }
 
+    extractAndCleanJSON(responseText) {
+        try {
+            // Remove common markdown formatting and extra text
+            let cleaned = responseText
+                .replace(/```json\s*/gi, '')  // Remove ```json
+                .replace(/```\s*/gi, '')      // Remove ```
+                .replace(/^\s*Here.*?:/gmi, '') // Remove "Here is the JSON:" etc
+                .replace(/^\s*The.*?:/gmi, '')  // Remove "The extracted data:"
+                .replace(/\*\*/g, '')         // Remove bold markdown **
+                .replace(/\*/g, '')           // Remove asterisks *
+                .trim();
+
+            // Find JSON object bounds more carefully
+            let startIndex = cleaned.indexOf('{');
+            let endIndex = cleaned.lastIndexOf('}');
+            
+            if (startIndex === -1 || endIndex === -1 || startIndex >= endIndex) {
+                throw new Error('No valid JSON object found in response');
+            }
+
+            // Extract the JSON portion
+            let jsonString = cleaned.substring(startIndex, endIndex + 1);
+            
+            // Clean up common issues in JSON values
+            jsonString = this.sanitizeJSONValues(jsonString);
+            
+            // Parse and validate
+            const parsed = JSON.parse(jsonString);
+            
+            // Additional cleaning of string values
+            return this.cleanObjectValues(parsed);
+            
+        } catch (error) {
+            console.error('JSON extraction error:', error.message);
+            console.error('Original response:', responseText);
+            
+            // Fallback: try to create a minimal valid object
+            return this.createFallbackObject(responseText);
+        }
+    }
+
+    sanitizeJSONValues(jsonString) {
+        // Fix common issues in JSON string values
+        return jsonString
+            // Remove asterisks from values but not structure
+            .replace(/"([^"]*)\*([^"]*)"/g, '"$1$2"')
+            // Remove markdown bold from values
+            .replace(/"([^"]*)\*\*([^"]*)\*\*([^"]*)"/g, '"$1$2$3"')
+            // Escape unescaped quotes in values
+            .replace(/: "([^"]*)"([^",}\]]*[^"\s])"([^"]*)"(,|\}|\])/g, (match, p1, p2, p3, p4) => {
+                return `: "${p1}\\"${p2}\\"${p3}"${p4}`;
+            })
+            // Remove newlines in string values
+            .replace(/: "([^"]*)\n([^"]*)"/g, ': "$1 $2"');
+    }
+
+    cleanObjectValues(obj) {
+        if (typeof obj !== 'object' || obj === null) {
+            return obj;
+        }
+
+        if (Array.isArray(obj)) {
+            return obj.map(item => this.cleanObjectValues(item));
+        }
+
+        const cleaned = {};
+        for (const [key, value] of Object.entries(obj)) {
+            if (typeof value === 'string') {
+                // Clean string values
+                cleaned[key] = value
+                    .replace(/\*\*/g, '')     // Remove **bold**
+                    .replace(/\*/g, '')       // Remove *italic*
+                    .replace(/\n+/g, ' ')     // Replace newlines with spaces
+                    .replace(/\s+/g, ' ')     // Collapse multiple spaces
+                    .trim();
+            } else {
+                cleaned[key] = this.cleanObjectValues(value);
+            }
+        }
+        return cleaned;
+    }
+
+    createFallbackObject(responseText) {
+        // Create a minimal object when JSON parsing fails completely
+        console.log('Creating fallback object due to JSON parsing failure');
+        
+        return {
+            supplier: 'Unknown',
+            invoice_number: '',
+            date: new Date().toISOString().split('T')[0],
+            total: '',
+            tax: '',
+            items: [{
+                description: 'Parsing failed - check original document',
+                quantity: '',
+                unit_price: '',
+                total_price: '',
+                sku: ''
+            }]
+        };
+    }
+
     async addInvoiceItemRowWithHyperlink(invoiceData, item, filename, rowNumber) {
         // Get the Invoice Items sheet ID
         const sheetId = await this.getSheetIdByName('Invoice Items');
@@ -1062,6 +1163,18 @@ app.post('/api/start-monitor', (req, res) => {
             throw new Error('Monitor is already running');
         }
 
+        // Save configuration for persistence
+        savedConfig = {
+            watchFolderId: config.watchFolderId,
+            completedFolderId: config.completedFolderId,
+            failedFolderId: config.failedFolderId,
+            invoiceWatchFolderId: config.invoiceWatchFolderId,
+            completedInvoicesFolderId: config.completedInvoicesFolderId,
+            failedInvoicesFolderId: config.failedInvoicesFolderId,
+            spreadsheetId: config.spreadsheetId,
+            checkInterval: config.checkInterval
+        };
+
         receiptMonitor = new CloudReceiptMonitor(config);
         receiptMonitor.start();
 
@@ -1131,12 +1244,50 @@ app.get('/api/monitor-stats', (req, res) => {
     }
 });
 
+// Configuration endpoints
+app.get('/api/get-config', (req, res) => {
+    res.json({
+        success: true,
+        config: savedConfig
+    });
+});
+
+app.post('/api/save-config', (req, res) => {
+    try {
+        const config = req.body;
+        
+        // Save configuration (in a real deployment, you'd want to persist this to a database)
+        savedConfig = {
+            watchFolderId: config.watchFolderId || '',
+            completedFolderId: config.completedFolderId || '',
+            failedFolderId: config.failedFolderId || '',
+            invoiceWatchFolderId: config.invoiceWatchFolderId || '',
+            completedInvoicesFolderId: config.completedInvoicesFolderId || '',
+            failedInvoicesFolderId: config.failedInvoicesFolderId || '',
+            spreadsheetId: config.spreadsheetId || '',
+            checkInterval: config.checkInterval || 60
+        };
+
+        res.json({
+            success: true,
+            message: 'Configuration saved'
+        });
+
+    } catch (error) {
+        res.json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'healthy',
         timestamp: new Date().toISOString(),
-        monitor: receiptMonitor ? receiptMonitor.isRunning : false
+        monitor: receiptMonitor ? receiptMonitor.isRunning : false,
+        configSaved: Object.keys(savedConfig).length > 0
     });
 });
 
