@@ -299,6 +299,10 @@ class CloudReceiptMonitor {
             // Step 4: Add to Google Sheets (Invoice Items tab)
             console.log('📊 Adding to Google Sheets (Invoice Items)...');
             await this.addInvoiceToGoogleSheets(invoiceData, file.name);
+
+            // Step 4.5: Update Price Tracking tab
+            console.log('📈 Updating price tracking...');
+            await this.updatePriceTracking(invoiceData, file.name);
             
             // Step 5: Move to completed invoices folder
             console.log('📁 Moving to completed invoices folder...');
@@ -437,15 +441,18 @@ class CloudReceiptMonitor {
                             "items": [
                                 {
                                     "description": "item name/description",
-                                    "quantity": "quantity ordered",
-                                    "unit_price": "price per unit including currency symbol",
-                                    "total_price": "total for this line item",
+                                    "quantity": "quantity ordered (just the number)",
+                                    "unit_type": "unit of measurement (e.g. kg, grams, L, pieces, lbs, oz)",
+                                    "unit_price": "price per unit including currency symbol (if visible)",
+                                    "total_price": "total for this line item including currency symbol",
                                     "sku": "product code/SKU if visible"
                                 }
                             ]
                         }
                         
-                        Focus on extracting individual item details with their specific prices. Look for line items, product codes, quantities, and unit prices. This is for tracking supplier pricing data.
+                        Look carefully for units of measurement like kg, grams, L, lbs, oz, pieces, etc. Extract the numeric quantity and unit type separately.
+                        If unit price is not visible but you have quantity, unit type, and total price, leave unit_price empty - we'll calculate it.
+                        Focus on extracting individual item details with their specific prices and units.
                         IMPORTANT: Return ONLY valid JSON. No markdown, no extra text, no explanation, no asterisks, no bold formatting.`
                     },
                     {
@@ -477,7 +484,18 @@ class CloudReceiptMonitor {
         const responseText = data.choices[0].message.content;
         
         // Clean and extract JSON more robustly
-        return this.extractAndCleanJSON(responseText);
+        const parsedData = this.extractAndCleanJSON(responseText);
+        
+        // Calculate missing unit prices using backup model if needed
+        if (parsedData.items) {
+            for (let item of parsedData.items) {
+                if (!item.unit_price && item.quantity && item.total_price) {
+                    item.unit_price = await this.calculateUnitPrice(item.quantity, item.total_price, item.unit_type);
+                }
+            }
+        }
+        
+        return parsedData;
     }
 
     async addToGoogleSheets(receiptData, filename) {
@@ -558,10 +576,10 @@ class CloudReceiptMonitor {
     }
 
     async addInvoiceHeadersToSheet() {
-        const headerRange = "'Invoice Items'!A1:K1";
+        const headerRange = "'Invoice Items'!A1:L1";
         const headers = [
             'Date', 'Supplier', 'Invoice Number', 'Item Description', 'Quantity', 
-            'Unit Price', 'Total Price', 'SKU', 'Source File', 'Invoice Link', 'Processed'
+            'Unit Type', 'Unit Price', 'Total Price', 'SKU', 'Source File', 'Invoice Link', 'Processed'
         ];
 
         const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.config.spreadsheetId}/values/${encodeURIComponent(headerRange)}?valueInputOption=RAW`;
@@ -698,7 +716,7 @@ class CloudReceiptMonitor {
                         title: 'Invoice Items',
                         gridProperties: {
                             rowCount: 1000,
-                            columnCount: 11
+                            columnCount: 12
                         }
                     }
                 }
@@ -961,11 +979,55 @@ class CloudReceiptMonitor {
             items: [{
                 description: 'Parsing failed - check original document',
                 quantity: '',
+                unit_type: '',
                 unit_price: '',
                 total_price: '',
                 sku: ''
             }]
         };
+    }
+
+    async calculateUnitPrice(quantity, totalPrice, unitType) {
+        try {
+            // Use backup model for math calculations
+            const requestBody = {
+                model: "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                messages: [{
+                    role: "user",
+                    content: `Calculate the unit price: Total price is ${totalPrice} for ${quantity} ${unitType || 'units'}.
+                    
+                    Please calculate: ${totalPrice} ÷ ${quantity} = unit price
+                    
+                    Return ONLY the calculated unit price with currency symbol (e.g., "$1.25"). 
+                    If calculation cannot be performed, return "N/A".`
+                }],
+                max_tokens: 100,
+                temperature: 0.1
+            };
+
+            const response = await fetch('https://api.together.xyz/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.config.togetherApiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Together API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            const calculatedPrice = data.choices[0].message.content.trim();
+            
+            console.log(`📊 Calculated unit price: ${totalPrice} ÷ ${quantity} = ${calculatedPrice}`);
+            return calculatedPrice;
+
+        } catch (error) {
+            console.error('Error calculating unit price:', error.message);
+            return 'N/A';
+        }
     }
 
     async addInvoiceItemRowWithHyperlink(invoiceData, item, filename, rowNumber) {
@@ -981,6 +1043,7 @@ class CloudReceiptMonitor {
             { userEnteredValue: { stringValue: invoiceData.invoice_number || '' } },
             { userEnteredValue: { stringValue: item ? item.description || '' : 'No items found' } },
             { userEnteredValue: { stringValue: item ? item.quantity || '' : '' } },
+            { userEnteredValue: { stringValue: item ? item.unit_type || '' : '' } },
             { userEnteredValue: { stringValue: item ? item.unit_price || '' : '' } },
             { userEnteredValue: { stringValue: item ? item.total_price || '' : invoiceData.total || '' } },
             { userEnteredValue: { stringValue: item ? item.sku || '' : '' } },
@@ -1002,7 +1065,7 @@ class CloudReceiptMonitor {
                         startRowIndex: rowNumber - 1,
                         endRowIndex: rowNumber,
                         startColumnIndex: 0,
-                        endColumnIndex: 11
+                        endColumnIndex: 12
                     },
                     rows: [{
                         values: rowData
@@ -1095,13 +1158,14 @@ class CloudReceiptMonitor {
         const currentData = await currentResponse.json();
         const nextRow = currentData.values ? currentData.values.length + 1 : 1;
 
-        // Prepare failure row data
+        // Prepare failure row data (updated for new column structure)
         const failureRowData = [
             new Date().toISOString().split('T')[0], // Date
             'PROCESSING FAILED', // Supplier
             '', // Invoice Number
             `Error: ${errorMessage}`, // Item Description (error message)
             '', // Quantity
+            '', // Unit Type
             '', // Unit Price
             '', // Total Price
             '', // SKU
@@ -1113,13 +1177,13 @@ class CloudReceiptMonitor {
         // Add headers if first row
         let range, values;
         if (nextRow === 1) {
-            range = "'Invoice Items'!A1:K2";
+            range = "'Invoice Items'!A1:L2";
             values = [
-                ['Date', 'Supplier', 'Invoice Number', 'Item Description', 'Quantity', 'Unit Price', 'Total Price', 'SKU', 'Source File', 'Invoice Link', 'Processed'],
+                ['Date', 'Supplier', 'Invoice Number', 'Item Description', 'Quantity', 'Unit Type', 'Unit Price', 'Total Price', 'SKU', 'Source File', 'Invoice Link', 'Processed'],
                 failureRowData
             ];
         } else {
-            range = `'Invoice Items'!A${nextRow}:K${nextRow}`;
+            range = `'Invoice Items'!A${nextRow}:L${nextRow}`;
             values = [failureRowData];
         }
 
@@ -1134,6 +1198,296 @@ class CloudReceiptMonitor {
             },
             body: JSON.stringify({ values })
         });
+    }
+
+    async updatePriceTracking(invoiceData, filename) {
+        try {
+            // Ensure Price Tracking tab exists
+            await this.ensurePriceTrackingTabExists();
+
+            // Process each item for price tracking
+            if (invoiceData.items && invoiceData.items.length > 0) {
+                for (const item of invoiceData.items) {
+                    if (item.description && item.unit_price && item.unit_type) {
+                        await this.updateProductPriceHistory(
+                            item.description,
+                            invoiceData.supplier,
+                            item.unit_price,
+                            item.unit_type,
+                            invoiceData.invoiceLink,
+                            invoiceData.date
+                        );
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Error updating price tracking:', error.message);
+        }
+    }
+
+    async ensurePriceTrackingTabExists() {
+        try {
+            // Try to get the Price Tracking sheet
+            const sheetUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.config.spreadsheetId}`;
+            const response = await fetch(sheetUrl, {
+                headers: {
+                    'Authorization': `Bearer ${this.googleTokens.access_token}`
+                }
+            });
+
+            const spreadsheetData = await response.json();
+            const priceTrackingSheet = spreadsheetData.sheets?.find(sheet => 
+                sheet.properties.title === 'Price Tracking'
+            );
+
+            // If Price Tracking tab doesn't exist, create it
+            if (!priceTrackingSheet) {
+                await this.createPriceTrackingTab();
+            }
+        } catch (error) {
+            // If error, try to create the tab
+            await this.createPriceTrackingTab();
+        }
+    }
+
+    async createPriceTrackingTab() {
+        const batchUpdateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.config.spreadsheetId}:batchUpdate`;
+        
+        const batchUpdateBody = {
+            requests: [{
+                addSheet: {
+                    properties: {
+                        title: 'Price Tracking',
+                        gridProperties: {
+                            rowCount: 1000,
+                            columnCount: 10
+                        }
+                    }
+                }
+            }]
+        };
+
+        await fetch(batchUpdateUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.googleTokens.access_token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(batchUpdateBody)
+        });
+
+        // Add headers
+        await this.addPriceTrackingHeaders();
+    }
+
+    async addPriceTrackingHeaders() {
+        const headerRange = "'Price Tracking'!A1:J1";
+        const headers = [
+            'Product Name', 'Supplier', 'Current Price per Unit', 'Unit Type', 
+            'Current Invoice Link', 'Previous Price', 'Previous Invoice Link', 
+            'Price Change %', 'Last Updated', 'Price History Count'
+        ];
+
+        const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.config.spreadsheetId}/values/${encodeURIComponent(headerRange)}?valueInputOption=RAW`;
+        
+        await fetch(updateUrl, {
+            method: 'PUT',
+            headers: {
+                'Authorization': `Bearer ${this.googleTokens.access_token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ values: [headers] })
+        });
+    }
+
+    async updateProductPriceHistory(productName, supplier, currentPrice, unitType, invoiceLink, date) {
+        try {
+            // Get current price tracking data
+            const currentDataUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.config.spreadsheetId}/values/'Price Tracking'`;
+            const currentResponse = await fetch(currentDataUrl, {
+                headers: {
+                    'Authorization': `Bearer ${this.googleTokens.access_token}`
+                }
+            });
+
+            const currentData = await currentResponse.json();
+            const rows = currentData.values || [];
+
+            // Find existing product entry
+            let existingRowIndex = -1;
+            let existingRow = null;
+
+            for (let i = 1; i < rows.length; i++) { // Skip header row
+                if (rows[i][0] === productName && rows[i][1] === supplier && rows[i][3] === unitType) {
+                    existingRowIndex = i;
+                    existingRow = rows[i];
+                    break;
+                }
+            }
+
+            if (existingRowIndex !== -1 && existingRow) {
+                // Update existing product
+                await this.updateExistingProductPrice(existingRowIndex + 1, existingRow, currentPrice, invoiceLink, date);
+            } else {
+                // Add new product
+                await this.addNewProductPrice(productName, supplier, currentPrice, unitType, invoiceLink, date);
+            }
+
+        } catch (error) {
+            console.error('Error updating product price history:', error.message);
+        }
+    }
+
+    async updateExistingProductPrice(rowNumber, existingRow, newPrice, invoiceLink, date) {
+        // Get previous price for comparison
+        const previousPrice = existingRow[2] || '0'; // Current price becomes previous
+        const previousInvoiceLink = existingRow[4] || ''; // Current link becomes previous
+
+        // Calculate price change percentage
+        const priceChange = this.calculatePriceChange(previousPrice, newPrice);
+        
+        // Determine color based on price change
+        let backgroundColor = null;
+        if (priceChange > 0) {
+            backgroundColor = { red: 1.0, green: 0.0, blue: 0.0, alpha: 0.3 }; // Light red for increase
+        } else if (priceChange < 0) {
+            backgroundColor = { red: 0.0, green: 1.0, blue: 0.0, alpha: 0.3 }; // Light green for decrease
+        }
+
+        const historyCount = parseInt(existingRow[9] || '0') + 1;
+
+        // Update the row with color coding
+        await this.updatePriceTrackingRowWithColor(rowNumber, [
+            existingRow[0], // Product Name
+            existingRow[1], // Supplier
+            newPrice, // Current Price
+            existingRow[3], // Unit Type
+            invoiceLink, // Current Invoice Link
+            previousPrice, // Previous Price
+            previousInvoiceLink, // Previous Invoice Link
+            `${priceChange > 0 ? '+' : ''}${priceChange.toFixed(1)}%`, // Price Change %
+            date, // Last Updated
+            historyCount.toString() // Price History Count
+        ], backgroundColor);
+
+        console.log(`📈 Updated price tracking for ${existingRow[0]}: ${previousPrice} → ${newPrice} (${priceChange > 0 ? '+' : ''}${priceChange.toFixed(1)}%)`);
+    }
+
+    async addNewProductPrice(productName, supplier, currentPrice, unitType, invoiceLink, date) {
+        // Get next available row
+        const currentDataUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.config.spreadsheetId}/values/'Price Tracking'`;
+        const currentResponse = await fetch(currentDataUrl, {
+            headers: {
+                'Authorization': `Bearer ${this.googleTokens.access_token}`
+            }
+        });
+
+        const currentData = await currentResponse.json();
+        const nextRow = currentData.values ? currentData.values.length + 1 : 2;
+
+        // Add new product entry
+        const newRowData = [
+            productName,
+            supplier,
+            currentPrice,
+            unitType,
+            invoiceLink,
+            '', // No previous price yet
+            '', // No previous invoice link yet
+            'New Product', // Price change
+            date,
+            '1' // First entry
+        ];
+
+        const range = `'Price Tracking'!A${nextRow}:J${nextRow}`;
+        const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.config.spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=RAW`;
+        
+        await fetch(updateUrl, {
+            method: 'PUT',
+            headers: {
+                'Authorization': `Bearer ${this.googleTokens.access_token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ values: [newRowData] })
+        });
+
+        console.log(`📊 Added new product to price tracking: ${productName} - ${currentPrice} per ${unitType}`);
+    }
+
+    async updatePriceTrackingRowWithColor(rowNumber, rowData, backgroundColor) {
+        const sheetId = await this.getSheetIdByName('Price Tracking');
+        const batchUpdateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${this.config.spreadsheetId}:batchUpdate`;
+        
+        const requests = [];
+
+        // Update cell values
+        requests.push({
+            updateCells: {
+                range: {
+                    sheetId: sheetId,
+                    startRowIndex: rowNumber - 1,
+                    endRowIndex: rowNumber,
+                    startColumnIndex: 0,
+                    endColumnIndex: 10
+                },
+                rows: [{
+                    values: rowData.map(value => ({
+                        userEnteredValue: { stringValue: value.toString() }
+                    }))
+                }],
+                fields: 'userEnteredValue'
+            }
+        });
+
+        // Apply background color if specified
+        if (backgroundColor) {
+            requests.push({
+                updateCells: {
+                    range: {
+                        sheetId: sheetId,
+                        startRowIndex: rowNumber - 1,
+                        endRowIndex: rowNumber,
+                        startColumnIndex: 2, // Current Price column
+                        endColumnIndex: 3
+                    },
+                    rows: [{
+                        values: [{
+                            userEnteredFormat: {
+                                backgroundColor: backgroundColor
+                            }
+                        }]
+                    }],
+                    fields: 'userEnteredFormat.backgroundColor'
+                }
+            });
+        }
+
+        const batchUpdateBody = { requests };
+
+        await fetch(batchUpdateUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.googleTokens.access_token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(batchUpdateBody)
+        });
+    }
+
+    calculatePriceChange(oldPriceStr, newPriceStr) {
+        try {
+            // Extract numeric values from price strings
+            const oldPrice = parseFloat(oldPriceStr.replace(/[^0-9.-]/g, ''));
+            const newPrice = parseFloat(newPriceStr.replace(/[^0-9.-]/g, ''));
+            
+            if (oldPrice === 0 || isNaN(oldPrice) || isNaN(newPrice)) {
+                return 0;
+            }
+            
+            return ((newPrice - oldPrice) / oldPrice) * 100;
+        } catch (error) {
+            return 0;
+        }
     }
 
     getStats() {
